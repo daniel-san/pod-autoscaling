@@ -1,0 +1,64 @@
+# Lab-only: does the Go runtime follow in-place resizes?
+# Prints GOMAXPROCS and the GOMEMLIMIT seen by the runtime every 2 s.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: go-probe
+  namespace: demo
+data:
+  main.go: |
+    package main
+
+    import (
+        "fmt"
+        "runtime"
+        "runtime/debug"
+        "time"
+    )
+
+    func main() {
+        for {
+            fmt.Printf("%s GOMAXPROCS=%d NumCPU=%d GOMEMLIMIT=%dMiB\n",
+                time.Now().Format("15:04:05"), runtime.GOMAXPROCS(0), runtime.NumCPU(),
+                debug.SetMemoryLimit(-1)>>20)
+            time.Sleep(2 * time.Second)
+        }
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: go-probe
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: golang:1.27-alpine
+      # Build first, then exec the binary so the runtime under test is the probe itself.
+      command: ["sh", "-c", "mkdir -p /work && cd /work && cp /src/main.go . && go mod init probe >/dev/null 2>&1 && go build -o probe . && exec ./probe"]
+      env:
+        - name: GOFLAGS
+          value: "-buildvcs=false"
+        # GOMEMLIMIT from the memory limit via the downward API (evaluated at container start).
+        - name: MEM_LIMIT_MIB
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
+              divisor: 1Mi
+        - name: GOMEMLIMIT
+          value: "$(MEM_LIMIT_MIB)MiB"
+      resizePolicy:
+        - resourceName: cpu
+          restartPolicy: NotRequired
+        - resourceName: memory
+          restartPolicy: NotRequired
+      resources:
+        requests: { cpu: 250m, memory: 256Mi }
+        limits: { cpu: "2", memory: 768Mi }
+      volumeMounts:
+        - name: src
+          mountPath: /src
+  volumes:
+    - name: src
+      configMap:
+        name: go-probe

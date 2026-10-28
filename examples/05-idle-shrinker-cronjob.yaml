@@ -87,8 +87,9 @@ data:
 
     pods=$(kubectl -n "$NS" get pods -l idle-shrink=enabled \
       --field-selector=status.phase=Running -o json)
+    failures=0
 
-    echo "$pods" | jq -c '.items[]' | while read -r pod; do
+    while read -r pod; do
       name=$(jq -r '.metadata.name' <<<"$pod")
       cfg=$(jq -r --arg a "$ANN" '.metadata.annotations[$a] // empty' <<<"$pod")
       [[ -z "$cfg" ]] && { echo "skip $name: no $ANN annotation"; continue; }
@@ -97,7 +98,9 @@ data:
       fi
 
       patch='{"spec":{"containers":[]}}'
-      for c in $(jq -r 'keys[]' <<<"$cfg"); do
+      # Walk containers in pod spec order: the resize subresource rejects a patch
+      # that lists containers in a different order than the pod.
+      for c in $(jq -r --argjson cfg "$cfg" '.spec.containers[].name | select(. as $n | $cfg | has($n))' <<<"$pod"); do
         if [[ "$MODE" == "idle" ]]; then
           cpu=$(jq -r --arg c "$c" '.[$c].cpu' <<<"$cfg")
           mem=$(jq -r --arg c "$c" '.[$c].memory' <<<"$cfg")
@@ -129,8 +132,13 @@ data:
       echo "$MODE $name -> $patch"
       # Strategic merge patch (the default) merges containers by name.
       # Do not use --type merge here: it replaces the whole containers list.
-      kubectl -n "$NS" patch pod "$name" --subresource resize -p "$patch"
-    done
+      # One failing pod must not stop the others; the job still fails at the end.
+      if ! kubectl -n "$NS" patch pod "$name" --subresource resize -p "$patch"; then
+        echo "ERROR: resize failed for $name"; failures=$((failures + 1))
+      fi
+    done < <(jq -c '.items[]' <<<"$pods")
+
+    if (( failures > 0 )); then echo "$failures pod(s) failed"; exit 1; fi
 ---
 apiVersion: batch/v1
 kind: CronJob

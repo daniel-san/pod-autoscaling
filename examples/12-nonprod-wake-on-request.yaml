@@ -1,0 +1,87 @@
+# Non-production web app (or a rarely used internal tool) that goes to ZERO replicas
+# when idle and wakes up on the first HTTP request.
+#
+# Requires KEDA and the KEDA HTTP add-on (beta; validated with keda 2.21.0 and
+# keda-add-ons-http 0.16.0). The add-on pods themselves must run on a node pool that
+# never scales to zero (see the Oracle KEDA + Cluster Autoscaler blog).
+#
+#   helm install http-add-on kedacore/keda-add-ons-http -n keda
+#
+# Traffic must go through the interceptor proxy (Service
+# keda-add-ons-http-interceptor-proxy.keda:8080): point your Ingress/Gateway there and
+# keep the Host header. The interceptor holds the first request while the pod starts.
+#
+# Behaviour:
+#  - cron trigger keeps 1 replica during office hours, so daytime users never wait;
+#  - outside office hours the app goes to 0 after cooldownPeriod with no traffic;
+#  - a request at night wakes it (the user waits for one cold start).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: dev
+spec:
+  replicas: 0                       # KEDA owns the replica count
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.29-alpine
+          ports: [{ containerPort: 80 }]
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 1        # short period = the interceptor can forward sooner
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: dev
+spec:
+  selector: { app: web }
+  ports: [{ port: 80, targetPort: 80 }]
+---
+apiVersion: http.keda.sh/v1beta1
+kind: InterceptorRoute
+metadata:
+  name: web
+  namespace: dev
+spec:
+  target:
+    service: web
+    port: 80
+  rules:
+    - hosts: ["web.dev.example.com"]   # must match the Host header callers send
+  scalingMetric:
+    concurrency:
+      targetValue: 10                  # concurrent requests per replica
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: web
+  namespace: dev
+spec:
+  scaleTargetRef:
+    name: web
+  minReplicaCount: 0
+  maxReplicaCount: 3
+  cooldownPeriod: 600                  # 10 min without requests before going to zero
+  triggers:
+    - type: cron
+      metadata:
+        timezone: America/Sao_Paulo
+        start: "30 7 * * 1-5"
+        end: "0 20 * * 1-5"
+        desiredReplicas: "1"
+    - type: external-push
+      metadata:
+        scalerAddress: keda-add-ons-http-external-scaler.keda:9090
+        interceptorRoute: web

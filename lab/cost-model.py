@@ -92,3 +92,48 @@ vn_ocpu, vn_gb = 1, 2  # 1Gi + 0.25 GB overhead = 1.32 GB -> 2 GB
 ocpu_p, gb_p, _ = SHAPES["E4 Flex (AMD)"]
 print(f"| Virtual node (Pod.Standard.E4.Flex), excluding the $0.015/h per-virtual-node fee | "
       f"{(vn_ocpu * ocpu_p + vn_gb * gb_p) * HOURS_PER_MONTH:.2f} |")
+
+
+section("5. Pod density: when IP addresses, not CPU/memory, limit packing")
+# Tiny idle pods (25m CPU, 128Mi memory requests) on E5 Flex nodes.
+# Assumptions: allocatable ~95% of vCPU and ~90% of memory; 4 pod slots per node
+# already taken by DaemonSets (kube-proxy, CNI, log/metrics agents).
+# VCN-native CNI (standard config): max pods = MIN((VNICs - 1) * 31, 256);
+# E5 Flex VNICs: 2 for 1 OCPU, 1 per OCPU from 2 OCPUs (max 24).
+# flannel: not limited by shape; kubelet default max-pods 110.
+POD_CPU, POD_GIB, DS_SLOTS = 0.025, 0.125, 4
+ocpu_p, gb_p, vcpu_per_ocpu = SHAPES["E5 Flex (AMD)"]
+print("| Node (E5 Flex) | USD/month | Pods by CPU/memory | VCN-native max | flannel max "
+      "| USD per tiny pod, VCN-native | USD per tiny pod, flannel |")
+print("|---|---|---|---|---|---|---|")
+for ocpus, gb in [(1, 8), (2, 16), (4, 32), (8, 64)]:
+    node_month = (ocpus * ocpu_p + gb * gb_p) * HOURS_PER_MONTH
+    by_res = int(min(ocpus * vcpu_per_ocpu * 0.95 / POD_CPU, gb / GIB_IN_GB * 0.9 / POD_GIB))
+    vnics = 2 if ocpus == 1 else min(ocpus, 24)
+    vcn = min((vnics - 1) * 31, 256)
+    fl = 110
+    eff_vcn = max(min(by_res, vcn) - DS_SLOTS, 1)
+    eff_fl = max(min(by_res, fl) - DS_SLOTS, 1)
+    print(f"| {ocpus} OCPU / {gb} GB | {node_month:.2f} | {by_res} | {vcn} | {fl} "
+          f"| {node_month / eff_vcn:.2f} | {node_month / eff_fl:.2f} |")
+
+section("6. What keeps costing money when an environment is at zero replicas")
+# Prices: OCI price list API, PAYG USD (2026-10-27).
+ENHANCED_CLUSTER_H = 0.10            # capped at USD 74.40/month
+LB_BASE_H = 0.0113                   # flexible LB; first 744 LB-hours/month free per tenancy
+BV_GB_MONTH = 0.0255 + 10 * 0.0017   # block volume, balanced (10 VPU/GB)
+BOOT_GB = 50                         # OKE default boot volume size
+sys_node = (1 * ocpu_p + 8 * gb_p) * HOURS_PER_MONTH + BOOT_GB * BV_GB_MONTH
+rows = [
+    ("Enhanced cluster control plane (basic cluster: free)", min(ENHANCED_CLUSTER_H * HOURS_PER_MONTH, 74.40)),
+    ("System node pool: 2 x E5 Flex 1 OCPU / 8 GB + 50 GB boot volume", 2 * sys_node),
+    ("System node pool, single node (dev only, no HA)", sys_node),
+    ("Flexible load balancer, beyond the free one (each)", LB_BASE_H * HOURS_PER_MONTH),
+    ("Network load balancer (each)", 0.0),
+    ("Persistent volume 50 GB, balanced (each)", 50 * BV_GB_MONTH),
+    ("App node pool scaled to 0 nodes", 0.0),
+]
+print("| Item | USD/month |")
+print("|---|---|")
+for name, usd in rows:
+    print(f"| {name} | {usd:.2f} |")

@@ -1,0 +1,59 @@
+# Lab-only: what Node.js reads from the container limits, and whether it follows
+# an in-place resize. Prints V8 heap limit, availableParallelism and RSS every 2 s.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-probe
+  namespace: demo
+data:
+  probe.js: |
+    const v8 = require('node:v8');
+    const os = require('node:os');
+    const mib = (b) => Math.round(b / 1048576);
+    setInterval(() => {
+      const h = v8.getHeapStatistics();
+      console.log(`${new Date().toISOString().slice(11, 19)} node=${process.version}` +
+        ` heap_limit=${mib(h.heap_size_limit)}MiB availableParallelism=${os.availableParallelism()}` +
+        ` constrainedMemory=${mib(process.constrainedMemory())}MiB rss=${mib(process.memoryUsage().rss)}MiB`);
+    }, 2000);
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: node-default
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: node:24-alpine
+      command: ["node", "/src/probe.js"]
+      resizePolicy:
+        - { resourceName: cpu, restartPolicy: NotRequired }
+        - { resourceName: memory, restartPolicy: NotRequired }
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { cpu: "1", memory: 512Mi }
+      volumeMounts: [{ name: src, mountPath: /src }]
+  volumes: [{ name: src, configMap: { name: node-probe } }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: node-percentage
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: node:24-alpine
+      command: ["node", "/src/probe.js"]
+      env:
+        - name: NODE_OPTIONS
+          value: "--max-old-space-size-percentage=75"
+      resizePolicy:
+        - { resourceName: cpu, restartPolicy: NotRequired }
+        - { resourceName: memory, restartPolicy: NotRequired }
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { cpu: "1", memory: 512Mi }
+      volumeMounts: [{ name: src, mountPath: /src }]
+  volumes: [{ name: src, configMap: { name: node-probe } }]

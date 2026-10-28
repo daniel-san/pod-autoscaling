@@ -1,0 +1,50 @@
+# Whole non-production namespaces to ZERO outside office hours, with one annotation.
+# GoKubeDownscaler (validated with chart caas-team/go-kube-downscaler 1.4.2):
+#
+#   helm repo add caas-team https://caas-team.github.io/helm-charts/
+#   helm install go-kube-downscaler caas-team/go-kube-downscaler -n kube-downscaler --create-namespace \
+#     --set 'includedResources={deployments,statefulsets}'   # chart default: deployments only
+#
+# Every Deployment/StatefulSet in the namespace is scaled to 0 outside the uptime window
+# and restored to its previous replica count inside it (kept in the workload annotation
+# downscaler/original-replicas). It checks every 60 s by default. New workloads are left
+# alone for a 15-minute grace period (downscaler/grace-period).
+#
+# Lab result: scaled a 3-replica Deployment to 0 within one check after the grace
+# period, left the excluded one running, restored 3 replicas ~30 s after uptime began.
+#
+# Pair it with a node pool whose Cluster Autoscaler minimum is 0 (or a Karpenter
+# NodePool) so the empty nodes are removed and stop costing money.
+#
+# Do not use it on workloads already scaled by a KEDA ScaledObject with
+# minReplicaCount: 0; KEDA handles those (see 12-nonprod-wake-on-request.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+  annotations:
+    downscaler/uptime: "Mon-Fri 07:30-20:00 America/Sao_Paulo"
+    # downscaler/downscale-replicas: "0"   # default; use "1" to keep one pod instead
+---
+# Opt one workload out (for example a shared database used by CI at night).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: always-on-tool
+  namespace: staging
+  annotations:
+    downscaler/exclude: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: always-on-tool }
+  template:
+    metadata:
+      labels: { app: always-on-tool }
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.29-alpine
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 200m, memory: 64Mi }

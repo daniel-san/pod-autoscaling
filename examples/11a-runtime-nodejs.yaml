@@ -1,0 +1,72 @@
+# Node.js service sized for "one warm, tiny pod" (Node 22+; validated with node:24-alpine).
+#
+# What the lab showed (Kubernetes 1.36, Node 24.22):
+# - V8's default heap limit comes from the container MEMORY LIMIT at start-up:
+#   512Mi limit -> 259 MiB heap. --max-old-space-size-percentage=75 -> 387 MiB.
+# - The heap limit is NOT recalculated after an in-place memory resize (512Mi -> 1Gi
+#   kept 259 MiB; nodejs/node#65235 tracks this). So resize only *requests* in place;
+#   change memory limits through a normal rollout.
+# - os.availableParallelism() follows the CPU LIMIT, also after an in-place resize (1 -> 2).
+# - After a burst, V8 kept ~120 MiB of garbage for about 100 s, then released it on
+#   its own (RSS 202 -> 63 MiB) with no new traffic. Measure idle RSS a few minutes
+#   after traffic stops before choosing an off-hours memory request.
+#
+# Sizing rules:
+# - JavaScript runs on one thread, so one process uses about one core at most. Keep the
+#   CPU limit at 1 (or 2 if you use worker_threads) and scale out with replicas,
+#   instead of running a cluster/PM2 fleet inside one pod.
+# - Memory limit = peak RSS + headroom; heap percentage 70-75% leaves room for buffers,
+#   native modules and the libuv thread pool.
+# - NODE_COMPILE_CACHE cuts start-up time on restarts. Writing it to an emptyDir only
+#   helps container restarts; generate it at image build time to help new pods
+#   (portable cache: Node 24.12+/25+, read-only cache: Node 26.8+).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-api
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: node-api }
+  template:
+    metadata:
+      labels:
+        app: node-api
+        idle-shrink: "enabled"
+      annotations:
+        idle-shrink.example.com/requests: '{"app":{"cpu":"25m","memory":"96Mi"}}'
+    spec:
+      containers:
+        - name: app
+          image: node:24-alpine            # replace with your image
+          command: ["node", "-e", "require('http').createServer((q,s)=>s.end('ok\\n')).listen(3000)"]
+          ports: [{ containerPort: 3000 }]
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size-percentage=75"
+            - name: NODE_COMPILE_CACHE
+              value: /tmp/node-compile-cache
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          resources:
+            requests: { cpu: 250m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          startupProbe:
+            httpGet: { path: /, port: 3000 }
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /, port: 3000 }
+            periodSeconds: 10
+            timeoutSeconds: 5              # generous: a throttled event loop answers late
+            failureThreshold: 6
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 256Mi }

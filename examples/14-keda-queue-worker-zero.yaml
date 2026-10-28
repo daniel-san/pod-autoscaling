@@ -1,0 +1,52 @@
+# Async workers can scale to zero in every environment, production included:
+# their "user" is a queue, and a few seconds of cold start only delays the job.
+#
+# KEDA redis-lists scaler (KEDA >= 2.x; validated with 2.21). Works with any job queue
+# that keeps pending jobs in a Redis list, for example Laravel's Redis queue driver
+# (list "queues:default"). For RabbitMQ, Kafka, SQL tables or Prometheus metrics,
+# swap the trigger; KEDA 2.21 has no OCI-specific scaler (OCI Queue or Streaming
+# consumers need the metrics-api / prometheus scaler or Streaming's Kafka endpoint).
+#
+# The worker below is a stand-in (redis-cli BRPOP). Replace it with your consumer,
+# e.g. `php artisan queue:work --stop-when-empty`, a BullMQ worker, or a Go consumer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jobs-worker
+  namespace: demo
+spec:
+  replicas: 0                       # KEDA owns the replica count
+  selector:
+    matchLabels: { app: jobs-worker }
+  template:
+    metadata:
+      labels: { app: jobs-worker }
+    spec:
+      terminationGracePeriodSeconds: 60   # let the current job finish on scale-in
+      containers:
+        - name: worker
+          image: redis:8-alpine
+          command: ["sh", "-c", "while true; do redis-cli -h redis BRPOP jobs 5 >/dev/null; sleep 1; done"]
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: jobs-worker
+  namespace: demo
+spec:
+  scaleTargetRef:
+    name: jobs-worker
+  minReplicaCount: 0                # zero pods when the queue is empty
+  maxReplicaCount: 10
+  pollingInterval: 10               # seconds between queue checks while at zero
+  cooldownPeriod: 120               # wait this long after the last job before going to zero
+  triggers:
+    - type: redis
+      metadata:
+        address: redis.demo.svc.cluster.local:6379
+        listName: jobs
+        listLength: "20"            # target jobs per replica
+        activationListLength: "0"   # any job wakes the first replica

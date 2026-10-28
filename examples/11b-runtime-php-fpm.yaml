@@ -1,0 +1,101 @@
+# PHP-FPM + nginx service sized for "one warm, tiny pod" (validated with php:8.4-fpm-alpine).
+#
+# What the lab showed (8 concurrent clients for 20 s, requests building ~24 MiB of
+# small objects each):
+#   pm = static,   max_children 8: 8 workers, 172 MiB held after load, still 172 MiB idle
+#   pm = ondemand, max_children 8: 8 workers, 172 MiB after load, 0 workers / 10 MiB 25 s later
+# With ondemand the idle footprint is the FPM master plus OPcache, so the off-hours
+# memory request can be very small, and the first request after idle only pays a fork
+# (milliseconds), not a pod cold start.
+#
+# Sizing rules:
+# - Memory limit >= pm.max_children x peak worker RSS + master/OPcache + headroom.
+#   pm.max_children is read at start-up; an in-place resize does not change it.
+# - CPU: one request = one worker process. CPU limit ~ the concurrency you want to
+#   sustain per pod (1-2); scale out with replicas beyond that.
+# - Long-running PHP (FrankenPHP worker mode, Laravel Octane, Swoole, RoadRunner) keeps
+#   the app in memory like Node.js: no idle drop. FrankenPHP is a Go program, so set
+#   GOMEMLIMIT and an explicit num_threads/max_threads (see examples/11c).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: php-api
+  namespace: demo
+data:
+  zz-pool.conf: |
+    [www]
+    pm = ondemand
+    pm.max_children = 8
+    pm.process_idle_timeout = 30s
+    pm.max_requests = 1000
+    ; health endpoint served by FPM itself
+    ping.path = /fpm-ping
+  nginx.conf: |
+    server {
+      listen 8080;
+      root /var/www/html/public;
+      location = /fpm-ping {
+        fastcgi_pass 127.0.0.1:9000;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_NAME /fpm-ping;
+        fastcgi_param SCRIPT_FILENAME /fpm-ping;
+      }
+      location / {
+        fastcgi_pass 127.0.0.1:9000;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+      }
+    }
+  index.php: |
+    <?php echo "ok\n";
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-api
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: php-api }
+  template:
+    metadata:
+      labels:
+        app: php-api
+        idle-shrink: "enabled"
+      annotations:
+        idle-shrink.example.com/requests: '{"php":{"cpu":"25m","memory":"48Mi"},"nginx":{"cpu":"10m","memory":"16Mi"}}'
+    spec:
+      containers:
+        - name: php
+          image: php:8.4-fpm-alpine        # replace with your image (code + extensions baked in)
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          resources:
+            requests: { cpu: 250m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          volumeMounts:
+            - { name: cfg, mountPath: /usr/local/etc/php-fpm.d/zz-pool.conf, subPath: zz-pool.conf }
+            - { name: cfg, mountPath: /var/www/html/public/index.php, subPath: index.php }
+        - name: nginx
+          image: nginx:1.29-alpine
+          ports: [{ containerPort: 8080 }]
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          resources:
+            requests: { cpu: 50m, memory: 32Mi }
+            limits: { cpu: 500m, memory: 64Mi }
+          startupProbe:
+            httpGet: { path: /fpm-ping, port: 8080 }
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /fpm-ping, port: 8080 }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/nginx/conf.d/default.conf, subPath: nginx.conf }
+      volumes:
+        - name: cfg
+          configMap: { name: php-api }

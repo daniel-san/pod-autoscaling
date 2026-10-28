@@ -1,0 +1,52 @@
+# Go service sized for "one warm, tiny pod" (Go 1.25+; validated with Go 1.27).
+#
+# What the lab showed (Kubernetes 1.36):
+# - GOMAXPROCS follows the CPU LIMIT, including in-place resizes: limit 1 -> 3 gave
+#   GOMAXPROCS=3 about 1 s later, with no restart. It never goes below 2 (documented
+#   floor), and it ignores CPU *requests*.
+# - This only happens when go.mod says `go 1.25` or later and GOMAXPROCS is not set in
+#   the environment. Older go.mod files keep the old behaviour (GOMAXPROCS = node cores),
+#   which on a 64-core node means 64 threads fighting over a 1-CPU quota.
+# - GOMEMLIMIT is not derived from the container automatically. A downward-API value
+#   is fixed at container start: after an in-place resize 768Mi -> 1Gi the runtime still
+#   reported 768 MiB. That is fine when only requests change in place.
+#
+# Sizing rules:
+# - Always set a CPU limit (or GOMAXPROCS) so Go sizes its scheduler and GC workers to
+#   the quota. Requests can then be shrunk freely.
+# - GOMEMLIMIT ~ 90% of the memory limit. With the downward API you get 100%; prefer an
+#   explicit value, or the github.com/KimMachineGun/automemlimit package.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-api
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: go-api }
+  template:
+    metadata:
+      labels:
+        app: go-api
+        idle-shrink: "enabled"
+      annotations:
+        idle-shrink.example.com/requests: '{"app":{"cpu":"25m","memory":"32Mi"}}'
+    spec:
+      containers:
+        - name: app
+          image: localhost/gohello:lab     # replace with your image (static binary, distroless/scratch)
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 80 }]
+          env:
+            - name: GOMEMLIMIT
+              value: "230MiB"              # ~90% of the 256Mi limit below
+          resizePolicy:
+            - { resourceName: cpu, restartPolicy: NotRequired }
+            - { resourceName: memory, restartPolicy: NotRequired }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "2", memory: 256Mi }
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            periodSeconds: 5

@@ -1,0 +1,43 @@
+# Spare capacity for unpredictable spikes: low-priority "placeholder" pods hold room on
+# the nodes. When a real pod (priority 0 by default) does not fit, the scheduler evicts
+# a placeholder at once and the real pod starts without waiting for a new node. The
+# evicted placeholder goes Pending, so the Cluster Autoscaler (or Karpenter) adds a node
+# for it in the background.
+#
+# Priority -5 is below the default 0 (so real pods preempt it) and NOT below the OKE
+# Cluster Autoscaler add-on's expendablePodsPriorityCutoff (-10), so a Pending
+# placeholder still triggers a scale-up.
+#
+# Size: one full-size replica of your largest service, per node pool that needs it.
+# Cost: you pay for the reserved room all the time; turn it off at night with
+# GoKubeDownscaler or a KEDA cron ScaledObject if night spikes are rare.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: capacity-placeholder
+value: -5
+preemptionPolicy: Never          # placeholders never evict anything themselves
+globalDefault: false
+description: "Spare capacity; preempted by any normal pod."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capacity-placeholder
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: capacity-placeholder }
+  template:
+    metadata:
+      labels: { app: capacity-placeholder }
+    spec:
+      priorityClassName: capacity-placeholder
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests: { cpu: "1", memory: 1Gi }    # = one full-size replica
+            limits: { cpu: "1", memory: 1Gi }

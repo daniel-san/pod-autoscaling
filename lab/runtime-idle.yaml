@@ -1,0 +1,94 @@
+# Lab-only: does memory come back after a burst when the process goes idle?
+# Each probe allocates ~150 MiB of small objects once, drops them, then only logs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idle-probes
+  namespace: demo
+data:
+  idle.js: |
+    const mib = (b) => Math.round(b / 1048576);
+    const log = (tag) => { const m = process.memoryUsage();
+      console.log(`${tag} t=${Math.round(process.uptime())}s rss=${mib(m.rss)}MiB heapUsed=${mib(m.heapUsed)}MiB`); };
+    let junk = [];
+    for (let i = 0; i < 1500; i++) junk.push(new Array(10000).fill(i).map(String));
+    log('after-alloc');
+    junk = null;
+    setInterval(() => log('idle'), 15000);
+  main.go: |
+    package main
+
+    import (
+        "fmt"
+        "os"
+        "runtime"
+        "strings"
+        "time"
+    )
+
+    func rss() int {
+        b, _ := os.ReadFile("/proc/self/status")
+        for _, l := range strings.Split(string(b), "\n") {
+            if strings.HasPrefix(l, "VmRSS:") {
+                var kb int
+                fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(l, "VmRSS:")), "%d", &kb)
+                return kb / 1024
+            }
+        }
+        return -1
+    }
+
+    func main() {
+        start := time.Now()
+        log := func(tag string) {
+            var m runtime.MemStats
+            runtime.ReadMemStats(&m)
+            fmt.Printf("%s t=%ds rss=%dMiB heapInuse=%dMiB\n", tag, int(time.Since(start).Seconds()), rss(), m.HeapInuse>>20)
+        }
+        junk := make([][]byte, 0, 150000)
+        for i := 0; i < 150000; i++ {
+            b := make([]byte, 1024)
+            for j := range b {
+                b[j] = byte(i + j) // touch the pages so they count in RSS
+            }
+            junk = append(junk, b)
+        }
+        log("after-alloc")
+        junk = nil
+        for {
+            time.Sleep(15 * time.Second)
+            log("idle")
+        }
+    }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idle-node
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: node:24-alpine
+      command: ["node", "/src/idle.js"]
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits: { cpu: "1", memory: 1Gi }
+      volumeMounts: [{ name: src, mountPath: /src }]
+  volumes: [{ name: src, configMap: { name: idle-probes } }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idle-go
+  namespace: demo
+spec:
+  containers:
+    - name: app
+      image: golang:1.27-alpine
+      command: ["sh", "-c", "mkdir -p /w && cd /w && cp /src/main.go . && go mod init idle >/dev/null 2>&1 && go build -o idle . && exec ./idle"]
+      resources:
+        requests: { cpu: 250m, memory: 256Mi }
+        limits: { cpu: "1", memory: 768Mi }
+      volumeMounts: [{ name: src, mountPath: /src }]
+  volumes: [{ name: src, configMap: { name: idle-probes } }]

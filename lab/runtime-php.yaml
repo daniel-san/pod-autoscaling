@@ -1,0 +1,87 @@
+# Lab-only: PHP-FPM memory at idle with pm=ondemand vs pm=static.
+# Each request builds ~24 MiB of small strings (closer to a framework request than one
+# big buffer) and sleeps 300 ms, so concurrent load spawns all workers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: php-lab
+  namespace: demo
+data:
+  index.php: |
+    <?php
+    $a = [];
+    for ($i = 0; $i < 250000; $i++) { $a[] = str_repeat(chr(65 + $i % 26), 40) . $i; }
+    usleep(300000);
+    echo "ok pid=" . getmypid() . " peak=" . round(memory_get_peak_usage(true) / 1048576) . "MiB\n";
+  nginx.conf: |
+    server {
+      listen 8080;
+      root /app;
+      location / {
+        fastcgi_pass 127.0.0.1:9000;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME /app/index.php;
+      }
+    }
+  pool-ondemand.conf: |
+    [www]
+    pm = ondemand
+    pm.max_children = 8
+    pm.process_idle_timeout = 10s
+    pm.max_requests = 500
+  pool-static.conf: |
+    [www]
+    pm = static
+    pm.max_children = 8
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: php-ondemand
+  namespace: demo
+  labels: { app: php-ondemand }
+spec:
+  containers:
+    - name: php
+      image: php:8.4-fpm-alpine
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: "1", memory: 512Mi }
+      volumeMounts:
+        - { name: cfg, mountPath: /app/index.php, subPath: index.php }
+        - { name: cfg, mountPath: /usr/local/etc/php-fpm.d/zz-lab.conf, subPath: pool-ondemand.conf }
+    - name: nginx
+      image: nginx:1.29-alpine
+      ports: [{ containerPort: 8080 }]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 500m, memory: 64Mi }
+      volumeMounts:
+        - { name: cfg, mountPath: /etc/nginx/conf.d/default.conf, subPath: nginx.conf }
+  volumes: [{ name: cfg, configMap: { name: php-lab } }]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: php-static
+  namespace: demo
+  labels: { app: php-static }
+spec:
+  containers:
+    - name: php
+      image: php:8.4-fpm-alpine
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { cpu: "1", memory: 512Mi }
+      volumeMounts:
+        - { name: cfg, mountPath: /app/index.php, subPath: index.php }
+        - { name: cfg, mountPath: /usr/local/etc/php-fpm.d/zz-lab.conf, subPath: pool-static.conf }
+    - name: nginx
+      image: nginx:1.29-alpine
+      ports: [{ containerPort: 8080 }]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 500m, memory: 64Mi }
+      volumeMounts:
+        - { name: cfg, mountPath: /etc/nginx/conf.d/default.conf, subPath: nginx.conf }
+  volumes: [{ name: cfg, configMap: { name: php-lab } }]
