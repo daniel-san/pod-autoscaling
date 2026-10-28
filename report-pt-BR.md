@@ -6,6 +6,8 @@ Escopo: como obter a maior parte da economia do scale-to-zero no Oracle Kubernet
 
 Todos os manifestos citados estão em [`examples/`](examples/). As afirmações marcadas com **(lab)** foram verificadas em um cluster local Kubernetes 1.36.4 com [`lab/run-lab.sh`](lab/run-lab.sh) e [`lab/run-runtime-lab.sh`](lab/run-runtime-lab.sh). Os números de custo vêm de [`lab/cost-model.py`](lab/cost-model.py) e da tabela pública de preços da OCI.
 
+**Unidades:** as quantidades de CPU e memória usam a notação do Kubernetes. `50m` significa 50 milicores, 5% de uma CPU; `512Mi` significa 512 mebibytes, meio gibibyte. O Apêndice C explica todas as unidades e mostra passo a passo como os custos mensais são calculados.
+
 Termos mantidos em inglês por serem os nomes usados no Kubernetes: *requests* (recursos reservados), *limits* (teto), *node* (nó de trabalho), *eviction* (despejo do pod pelo kubelet), *OOM kill* (processo morto por falta de memória).
 
 **Mudanças na revisão 2**, depois das respostas do time:
@@ -16,6 +18,8 @@ Termos mantidos em inglês por serem os nomes usados no Kubernetes: *requests* (
 - O que pode ir a zero, e o que continua custando dinheiro em zero (seção 11).
 - Comparação das variantes de cluster do OKE: basic ou enhanced, tipos de nó, autoscalers de nó, rede de pods, versão do Kubernetes (seção 12).
 - Novos exemplos 11a a 15. Correção no exemplo 05: ele falhava em pods com mais de um container.
+
+**Acrescentado em 28 de outubro:** Apêndice C, um glossário das unidades usadas para CPU, memória e preços, com um exemplo de custo calculado passo a passo.
 
 ---
 
@@ -201,13 +205,13 @@ spec:
 - O alvo de CPU é o percentil 90 do uso.
 - O alvo de memória é o percentil 90 dos *picos* diários.
 - Margem de segurança de 15% sobre os dois.
-- Pisos de 25m de CPU e 250 MB de memória por pod.
+- Pisos de 25m de CPU e 250 MiB de memória por pod.
 
 Ou seja, o VPA dimensiona o pod para o dia de pico. Ele não encolhe o pod à noite. Use o VPA como ferramenta de rightsizing e um mecanismo separado (5.4) para os períodos ociosos.
 
 **Resultados do lab:**
 - Com o workload "hamster" do upstream (request de 100m, consome cerca de 500m), o `InPlaceOrRecreate` subiu o request para 587m em cerca de dois minutos, no mesmo pod e sem reinícios.
-- O VPA também subiu o request de memória de 50Mi para 250Mi por causa do piso padrão de 250 MB. Para pods muito pequenos, reduza `--pod-recommendation-min-memory-mb` no recommender.
+- O VPA também subiu o request de memória de 50Mi para 250Mi por causa do piso padrão de 250 MiB (a flag se chama `-mb`, mas o lab mostrou o valor aplicado como `250Mi`). Para pods muito pequenos, reduza `--pod-recommendation-min-memory-mb` no recommender.
 
 ### 5.3 CPU startup boost: regime pequeno, inicialização rápida
 
@@ -261,7 +265,7 @@ Não combine (a) com o VPA em modo `InPlaceOrRecreate`, `Recreate` ou `InPlace` 
 
 ### 6.1 Preço por unidade
 
-No Kubernetes, `1` CPU = 1 vCPU. Nos shapes x86, 1 OCPU = 2 vCPUs. No Ampere A1, 1 OCPU = 1 vCPU. No A2, 1 OCPU = 2 cores.
+No Kubernetes, `1` CPU = 1 vCPU. Nos shapes x86, 1 OCPU = 2 vCPUs. No Ampere A1, 1 OCPU = 1 vCPU. No A2, 1 OCPU = 2 cores. O Apêndice C.4 mostra passo a passo como esses preços viram os valores mensais abaixo.
 
 | Shape | USD por vCPU-hora | USD por GB-hora | GB de RAM que custam o mesmo que 1 vCPU |
 |---|---|---|---|
@@ -822,3 +826,73 @@ Os comentários dentro dos manifestos estão em inglês.
 - PHP: [configuração do PHP-FPM](https://www.php.net/manual/en/install.fpm.configuration.php), [worker mode do FrankenPHP](https://frankenphp.dev/docs/worker/), [desempenho do FrankenPHP](https://frankenphp.dev/docs/performance/), [versões suportadas](https://www.php.net/releases/active.php).
 - Go: [release notes do Go 1.25](https://go.dev/doc/go1.25), [GOMAXPROCS ciente de containers](https://go.dev/blog/container-aware-gomaxprocs), [pacote runtime (GOMEMLIMIT)](https://pkg.go.dev/runtime), [downloads](https://go.dev/dl/).
 - Ferramentas: [KEDA](https://keda.sh), [KEDA HTTP add-on](https://github.com/kedacore/http-add-on), [GoKubeDownscaler](https://kube-downscaler.io/), [kube-startup-cpu-boost](https://github.com/google/kube-startup-cpu-boost), [Kedify PodResourceProfile](https://docs.kedify.io/how-to/prp-shrink-pod-instead-of-scale-to-zero/), [EPCAS](https://github.com/doordash-oss/elastic-cpu-pod-autoscaler), [OpenCost na OCI](https://www.opencost.io/docs/configuration/oracle), [disruption no Karpenter](https://karpenter.sh/docs/concepts/disruption/).
+
+
+## Apêndice C. Glossário de unidades
+
+As quantidades de CPU e memória neste relatório usam a notação do Kubernetes, a mesma dos manifestos de exemplo. Os preços usam as unidades de cobrança da OCI. Fontes: [unidades de recursos do Kubernetes](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#resource-units-in-kubernetes), [tabela de preços da OCI](https://www.oracle.com/br/cloud/price-list/).
+
+### C.1 CPU
+
+| Termo | Significado | Exemplo |
+|---|---|---|
+| CPU (Kubernetes) | Uma CPU em um request ou limit é uma CPU virtual (vCPU) do nó | `cpu: "1"` = uma vCPU inteira |
+| m (milicore) | Um milésimo de CPU; `1000m` = 1 CPU. Também chamado de millicpu | `50m` = 0,05 CPU, 5% de uma vCPU. `250m` = um quarto. `500m` e `0.5` são o mesmo valor: meia CPU |
+| vCPU | Uma thread de hardware. O Linux e o Kubernetes a contam como uma CPU | Um nó com 4 vCPUs comporta pods cujos requests somam um pouco menos de `4` (o sistema reserva uma parte) |
+| OCPU | A unidade de cobrança de CPU da Oracle: um core físico | Shapes x86 (E4, E5, E6): 1 OCPU = 2 vCPUs. Ampere A1: 1 OCPU = 1 vCPU. AmpereOne A2: 1 OCPU = 2 cores de uma thread = 2 vCPUs |
+| Request de CPU | CPU reservada para o container quando o scheduler o coloca em um nó. O modelo de custo precifica os requests | 30 pods × `50m` reservam 1,5 vCPU |
+| Limit de CPU | O máximo de CPU que o container pode usar, aplicado em períodos de 100 ms | `1` = até 100 ms de tempo de CPU a cada 100 ms. Acima disso o container sofre throttling (fica mais lento), não é morto |
+| Baseline (nós burstable) | A fração de cada OCPU que uma instância burstable da OCI pode usar o tempo todo. É também a fração cobrada | 2 OCPUs com baseline de 50% são cobradas como 1 OCPU |
+
+### C.2 Memória
+
+| Como aparece | Nome | Tamanho |
+|---|---|---|
+| `Ki`, `Mi`, `Gi` | kibibyte, mebibyte, gibibyte (unidades binárias) | Potências de 1024. 1Mi = 1.048.576 bytes; 1Gi = 1024Mi = 1.073.741.824 bytes |
+| `k`, `M`, `G` | kilobyte, megabyte, gigabyte (unidades decimais) | Potências de 1000. 1M = 1.000.000 bytes; 1G = 1.000.000.000 bytes |
+| MiB, GiB | O mesmo que `Mi`, `Gi` | O relatório escreve assim os valores medidos, por exemplo "RSS de 157 MiB" |
+| MB, GB | O mesmo que `M`, `G` | A OCI cobra memória por GB, e tamanhos de nó como "8 GB" são números da OCI |
+
+- `512Mi` é meio gibibyte (cerca de 537 MB). `1Gi` é cerca de 1,074 GB. `256M` é cerca de 5% menor que `256Mi`; os dois são válidos em um manifesto.
+- **Maiúsculas e minúsculas importam.** `M` maiúsculo significa megabytes, mas `m` minúsculo significa mili: `400m` de memória são 0,4 *bytes*. O Kubernetes aceita sem erro. Como request, reserva quase nada; como limit, o container não consegue iniciar. Para memória, escreva `400Mi`.
+- **Request de memória:** memória reservada no nó quando o pod é agendado. O container pode usar mais, mas aí fica entre os primeiros a sofrer eviction quando falta memória no nó (seção 6.3).
+- **Limit de memória:** teto rígido. Acima dele o container sofre OOM kill (é parado pelo kernel por usar memória demais) e é reiniciado.
+- **RSS (resident set size):** a memória que um processo realmente ocupa na RAM. As medições de memória em repouso das seções 6.4 e 7 são RSS, ou o uso total de memória do container (`memory.current`).
+- **Heap:** a memória que o runtime de uma linguagem gerencia para os objetos do programa (o V8 no Node.js, o runtime do Go). O máximo é definido por `--max-old-space-size` no Node.js e limitado de forma flexível pelo `GOMEMLIMIT` no Go. Ele precisa ficar abaixo do limit de memória do container.
+
+### C.3 Preços e tempo
+
+| Termo | Significado |
+|---|---|
+| USD, US$ | Dólares americanos, pela tabela pay-as-you-go da OCI em 27 de outubro de 2026, sem descontos nem impostos |
+| OCPU-hora | Preço de uma OCPU por uma hora. E5 Flex: US$ 0,030 |
+| vCPU-hora | O preço da OCPU-hora dividido pelas vCPUs de uma OCPU. E5 Flex: US$ 0,030 / 2 = US$ 0,015. O relatório usa esse valor porque o Kubernetes conta vCPUs |
+| GB-hora | Preço de 1 GB de memória por uma hora. E5 Flex: US$ 0,002 |
+| Mês | 730 horas (365 dias × 24 horas / 12 meses). Todo valor em USD/mês neste relatório é um preço por hora × 730. Os tetos mensais e franquias gratuitas da Oracle usam 744 horas (31 dias); por exemplo, a taxa do cluster enhanced tem teto de US$ 74,40 |
+| 24x7 | Rodando todas as horas do mês: 730 horas |
+| Horário comercial, fora do expediente | Horário comercial é de segunda a sexta, 08:00–20:00 no horário de São Paulo: 60 das 168 horas da semana (36%). Fora do expediente são as outras 108 horas (64%) |
+| Custo de um pod | O custo da capacidade de nó que os *requests* dele reservam, não do que ele realmente usa. Isso supõe que o autoscaler de nós mantém os nós bem empacotados (seção 2) |
+
+### C.4 Exemplo calculado: quanto custa um pod aquecido
+
+Um pod com requests de `50m` de CPU e `1Gi` de memória em nós E5 Flex, rodando 24x7:
+
+| Parte | Cálculo | USD/mês |
+|---|---|---|
+| CPU | `50m` = 0,05 vCPU. 0,05 × US$ 0,015 por vCPU-hora × 730 horas | 0,55 |
+| Memória | `1Gi` = 1,074 GB. 1,074 × US$ 0,002 por GB-hora × 730 horas | 1,57 |
+| Total | | 2,12 |
+
+- Com o request de CPU em `500m`, a parte de CPU fica 10 vezes maior: 0,5 × 0,015 × 730 = US$ 5,47, e o pod custa US$ 7,04 por mês. A CPU passa a ser 78% do custo (5,47 / 7,04), o número usado nas seções 1 e 6.2.
+- O número "7,5 GB de RAM custam o mesmo que 1 vCPU" da seção 6.1 é US$ 0,015 / US$ 0,002.
+- Os cenários de 30 serviços da seção 6.5 aplicam a mesma conta para cada hora da semana, e depois multiplicam pelo número de pods e de serviços.
+- **Premissa sobre a unidade de memória:** a tabela de preços da OCI diz "gigabyte", então o modelo de custo converte com 1Gi = 1,074 GB. Se a OCI na verdade contar memória em gigabytes binários (algumas tabelas da Oracle, como a do Compute Cloud@Customer, dizem "gibibyte"), os valores de memória ficam cerca de 7% menores. As conclusões não mudam: a CPU seria uma parte ainda maior do custo.
+
+### C.5 Outros termos usados com números
+
+| Termo | Significado |
+|---|---|
+| p90, p95 | Percentis 90 e 95: 90% (ou 95%) dos valores medidos ficam neste valor ou abaixo dele. O VPA define os requests de CPU a partir do p90 do uso |
+| Réplica | Uma cópia de um pod. "3 réplicas" significa três pods idênticos dividindo o tráfego |
+| Fração fora do expediente | A parte do uso de CPU da semana que acontece fora do horário comercial (seção 10.3). 0,64 significa uso constante; valores menores significam uso concentrado no horário comercial |
+| `Utilization` e `AverageValue` | Duas formas de definir o alvo de CPU de um HPA: como percentual do request (`Utilization`), ou como quantidade absoluta, por exemplo `400m` (`AverageValue`). A seção 5.5 explica por que este relatório usa a forma absoluta |
