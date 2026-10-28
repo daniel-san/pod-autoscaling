@@ -1,0 +1,34 @@
+# Lab-only pod that holds ~200 MiB of memory, used to show what happens when you
+# shrink memory requests vs memory limits in place.
+# Writing to a memory-backed emptyDir (tmpfs) charges the pages to the container's
+# memory cgroup, so `memory.current` stays at ~200 MiB for the life of the pod.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: memory-hog
+  namespace: demo
+spec:
+  containers:
+    - name: hog
+      image: busybox:1.37
+      command: ["sh", "-c", "dd if=/dev/zero of=/ram/fill bs=1M count=200 && sleep infinity"]
+      volumeMounts:
+        - name: ram
+          mountPath: /ram
+      resizePolicy:
+        - resourceName: cpu
+          restartPolicy: NotRequired
+        - resourceName: memory
+          restartPolicy: NotRequired
+      resources:
+        requests:
+          cpu: 50m
+          memory: 300Mi
+        limits:
+          cpu: 200m
+          memory: 400Mi
+  volumes:
+    - name: ram
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi

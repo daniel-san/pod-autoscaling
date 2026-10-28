@@ -1,0 +1,29 @@
+# Plain HPA alternative to 06 (no KEDA). Same key point: target an absolute
+# AverageValue so that changing CPU requests (VPA, idle shrinker, startup boost)
+# does not distort the scaling signal.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: AverageValue
+          averageValue: 400m
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

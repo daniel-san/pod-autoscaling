@@ -1,0 +1,45 @@
+# Use INSTEAD of 03-vpa-inplace.yaml (only one VPA may target a pod).
+#
+# CPU Startup Boost (VPA >= 1.7, alpha). Enable the gate on the admission controller
+# and the updater:  --feature-gates=CPUStartupBoost=true
+#
+# What it does: the admission controller multiplies the CPU request when the pod is
+# created; after the pod is Ready and durationSeconds have passed, the updater
+# resizes it back down in place (to the current recommendation, or to the pod spec
+# values when updateMode is "Off").
+#
+# Why it matters here: it lets you keep a very small steady-state CPU request and
+# still start (or restart) the pod quickly, which reduces the cold-start cost of
+# scaling out from 1 replica, or from 0 for non-production.
+#
+# With controlledValues: RequestsOnly the boosted request is capped just below the
+# container's CPU limit to preserve the QoS class, so the limit sets the ceiling.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  startupBoost:
+    cpu:
+      type: "Factor"
+      factor: 4
+      durationSeconds: 30
+  resourcePolicy:
+    containerPolicies:
+      - containerName: app
+        controlledResources: ["cpu", "memory"]
+        controlledValues: RequestsOnly
+        minAllowed:
+          cpu: 25m
+          memory: 128Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 2Gi

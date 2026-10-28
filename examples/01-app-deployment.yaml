@@ -1,0 +1,90 @@
+# Baseline workload prepared for in-place vertical scaling.
+#
+# Design choices (see report section "Implementation patterns"):
+# - Burstable QoS (requests < limits). In-place resize cannot change the QoS class,
+#   so a Burstable pod is the only kind where you can lower *requests* while keeping
+#   *limits* untouched.
+# - resizePolicy NotRequired for both resources: the kubelet applies the change to the
+#   running container without restarting it.
+# - CPU limit kept fixed. The JVM and other runtimes size thread pools from the CPU limit
+#   at start-up; changing only the request avoids surprising runtime behaviour.
+# - Memory limit kept fixed. Lowering a memory *request* never triggers an OOM kill by
+#   itself; lowering the *limit* below current usage would.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: demo
+  labels:
+    app: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+        # Opt-in label used by the schedule-based shrinker in 05-idle-shrinker-cronjob.yaml
+        idle-shrink: "enabled"
+      annotations:
+        # Off-hours requests per container, applied in place by 05-idle-shrinker-cronjob.yaml
+        idle-shrink.example.com/requests: '{"app":{"cpu":"25m","memory":"64Mi"}}'
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.29-alpine
+          ports:
+            - containerPort: 80
+          resizePolicy:
+            - resourceName: cpu
+              restartPolicy: NotRequired
+            - resourceName: memory
+              restartPolicy: NotRequired
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 5
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: my-app
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  selector:
+    app: my-app
+  ports:
+    - port: 80
+      targetPort: 80

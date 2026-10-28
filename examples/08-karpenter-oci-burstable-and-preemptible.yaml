@@ -1,0 +1,144 @@
+# Node layer for OKE with Karpenter Provider for OCI (KPO, GA April 2026; schema from v1.4.0).
+# Install KPO first: https://docs.oracle.com/iaas/Content/ContEng/Tasks/conteng-kpo.htm
+#
+# Two pools in addition to the small, manually sized system node pool:
+#
+# 1) "low-cpu": burstable E5/E4 Flex nodes. You pay for the baseline OCPU fraction only
+#    (50% here), memory is billed in full. Good for services that idle most of the day,
+#    non-production environments, and the shrunk off-hours replicas.
+#    CAVEAT: the kubelet reports the FULL vCPU count as allocatable, but sustained CPU is
+#    only the baseline (bursts last at most ~1 hour, depending on earned credit). Two
+#    ways to run it:
+#    a) Default (as below): the scheduler packs requests against the full 4 vCPU and you
+#       pay for 1 OCPU. Cheapest, but if the node's *average* CPU goes above the
+#       baseline, OCI caps the whole node and every pod on it slows down.
+#    b) Uncomment kubeletConfig.kubeReserved: the scheduler only sees the 2 sustained
+#       vCPU, so requests are always honoured. Price per allocatable vCPU is then the
+#       same as a regular node; the gain is free bursting above requests.
+#
+# 2) "preemptible": 50% cheaper, can be reclaimed at any time (OCI emits an event ~2 min
+#    before termination). Only for replicas you can lose: extra stateless replicas,
+#    batch, CI. Never put the single warm replica of a service here.
+#    OCI does not allow burstable + preemptible on the same instance.
+#
+# Consolidation is blocked during business hours with a disruption budget, so pods are
+# only moved (and pay their cold start) when traffic is low. Karpenter evaluates
+# budget schedules in UTC: 10:00 UTC = 07:00 America/Sao_Paulo.
+---
+apiVersion: oci.oraclecloud.com/v1beta1
+kind: OCINodeClass
+metadata:
+  name: low-cpu-e5-2ocpu
+spec:
+  shapeConfigs:
+    - ocpus: 2                         # 4 vCPU visible to Linux/Kubernetes
+      memoryInGbs: 32
+      baselineOcpuUtilization: BASELINE_1_2   # billed as 1 OCPU; sustained ~2 vCPU
+  # Option (b): make allocatable CPU match the sustained baseline (4 vCPU - 2 vCPU).
+  # kubeletConfig:
+  #   kubeReserved:
+  #     cpu: "2"
+  #     memory: 1Gi
+  volumeConfig:
+    bootVolumeConfig:
+      imageConfig:
+        imageType: OKEImage
+        imageFilter:
+          osFilter: "Oracle Linux"
+          osVersionFilter: "8"
+  networkConfig:
+    primaryVnicConfig:
+      subnetConfig:
+        subnetId: <worker-subnet-ocid>
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: low-cpu
+spec:
+  template:
+    metadata:
+      labels:
+        node-tier: low-cpu
+    spec:
+      nodeClassRef:
+        group: oci.oraclecloud.com
+        kind: OCINodeClass
+        name: low-cpu-e5-2ocpu
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: oci.oraclecloud.com/instance-shape
+          operator: In
+          values: ["VM.Standard.E5.Flex", "VM.Standard.E4.Flex"]
+      taints:
+        - key: node-tier
+          value: low-cpu
+          effect: NoSchedule
+      expireAfter: 720h
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 15m
+    budgets:
+      # No voluntary disruption 07:00-19:00 America/Sao_Paulo, Mon-Fri.
+      - nodes: "0"
+        schedule: "0 10 * * mon-fri"
+        duration: 12h
+      # Otherwise at most 20% of the pool at a time.
+      - nodes: "20%"
+  limits:
+    cpu: "64"
+    memory: 512Gi
+---
+apiVersion: oci.oraclecloud.com/v1beta1
+kind: OCINodeClass
+metadata:
+  name: preemptible-e5
+spec:
+  shapeConfigs:
+    - ocpus: 2
+      memoryInGbs: 16
+    - ocpus: 4
+      memoryInGbs: 32
+  volumeConfig:
+    bootVolumeConfig:
+      imageConfig:
+        imageType: OKEImage
+        imageFilter:
+          osFilter: "Oracle Linux"
+          osVersionFilter: "8"
+  networkConfig:
+    primaryVnicConfig:
+      subnetConfig:
+        subnetId: <worker-subnet-ocid>
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: preemptible
+spec:
+  template:
+    spec:
+      nodeClassRef:
+        group: oci.oraclecloud.com
+        kind: OCINodeClass
+        name: preemptible-e5
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]               # KPO maps "spot" to OCI preemptible capacity
+        - key: oci.oraclecloud.com/instance-shape
+          operator: In
+          values: ["VM.Standard.E5.Flex", "VM.Standard.E4.Flex"]
+      taints:
+        # Required: without this taint KPO does not offer preemptible capacity.
+        - key: oci.oraclecloud.com/oke-is-preemptible
+          value: present
+          effect: NoSchedule
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 5m
+  limits:
+    cpu: "128"
+    memory: 512Gi

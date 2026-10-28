@@ -1,0 +1,39 @@
+# Alternative to the VPA CPU Startup Boost (04) when you do not run VPA in update mode.
+# Operator: https://github.com/google/kube-startup-cpu-boost (validated with v0.21.3)
+#   kubectl apply -f https://github.com/google/kube-startup-cpu-boost/releases/download/v0.21.3/manifests.yaml
+#
+# Raises CPU requests AND limits by 300% while the pod starts, then reverts them in place
+# once the pod is Ready (or after 120 s, whichever comes first).
+#
+# Caveats from the project README:
+# - The JVM sizes GC/JIT thread pools from the CPU limit seen at start-up. A large boost
+#   leaves oversized pools after the revert; keep boosts modest or pin
+#   -XX:ActiveProcessorCount.
+# - The boosted request can trigger a node scale-up that becomes useless after the
+#   revert. Safer with some spare capacity or slow scale-down.
+# - Do not apply both this and a VPA startupBoost to the same pods.
+apiVersion: autoscaling.x-k8s.io/v1alpha1
+kind: StartupCPUBoost
+metadata:
+  name: my-app
+  namespace: demo
+selector:
+  matchExpressions:
+    - key: app
+      operator: In
+      values: ["my-app"]
+spec:
+  resourcePolicy:
+    containerPolicies:
+      - matchContainers:
+          type: ExactName
+          value: app
+        percentageIncrease:
+          value: 300
+  durationPolicy:
+    podCondition:
+      type: Ready
+      status: "True"
+    fixedDuration:
+      unit: Seconds
+      value: 120

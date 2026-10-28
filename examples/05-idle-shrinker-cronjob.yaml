@@ -1,0 +1,207 @@
+# Schedule-based "keep one warm, tiny pod" without extra operators.
+#
+# Off-hours CronJob: lowers the *requests* of opted-in pods in place (no restart).
+# Business-hours CronJob: restores the requests from the owning ReplicaSet template.
+# Limits are never touched, so the container keeps the same CPU ceiling and the same
+# memory ceiling (no new OOM-kill risk). The freed requests let the Cluster Autoscaler
+# or Karpenter remove or consolidate nodes.
+#
+# Opt-in contract on the pod template:
+#   labels:
+#     idle-shrink: "enabled"
+#   annotations:
+#     idle-shrink.example.com/requests: '{"app":{"cpu":"25m","memory":"192Mi"}}'
+#
+# Memory guard: the script never sets a memory request below current usage + 15%
+# (read from metrics-server), so a shrunk pod does not jump to the front of the
+# kubelet's node-pressure eviction queue.
+#
+# Do not use on workloads where a VPA in Recreate/InPlaceOrRecreate/InPlace mode is
+# active (VPA would undo the change), or with an HPA on CPU *Utilization* (shrinking
+# the request inflates utilization and triggers scale-out). See the report.
+#
+# Image: alpine/k8s ships kubectl + jq + bash. Mirror it into OCIR for production.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idle-shrinker
+  namespace: demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idle-shrinker
+  namespace: demo
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/resize"]
+    verbs: ["get", "patch"]     # kubectl patch reads the subresource before patching
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idle-shrinker
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: idle-shrinker
+    namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idle-shrinker
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idle-shrinker
+  namespace: demo
+data:
+  shrink.sh: |
+    #!/usr/bin/env bash
+    # Usage: shrink.sh idle|active
+    set -euo pipefail
+    MODE="${1:?usage: shrink.sh idle|active}"
+    NS="${POD_NAMESPACE:?}"
+    ANN='idle-shrink.example.com/requests'
+
+    to_mi() {  # "192Mi" | "1Gi" | "256M" -> integer MiB
+      local v="$1"
+      case "$v" in
+        *Gi) echo $(( ${v%Gi} * 1024 )) ;;
+        *Mi) echo "${v%Mi}" ;;
+        *G)  echo $(( ${v%G} * 1000 * 1000 * 1000 / 1048576 )) ;;
+        *M)  echo $(( ${v%M} * 1000 * 1000 / 1048576 )) ;;
+        *)   echo "unsupported memory unit: $v" >&2; return 1 ;;
+      esac
+    }
+
+    pods=$(kubectl -n "$NS" get pods -l idle-shrink=enabled \
+      --field-selector=status.phase=Running -o json)
+
+    echo "$pods" | jq -c '.items[]' | while read -r pod; do
+      name=$(jq -r '.metadata.name' <<<"$pod")
+      cfg=$(jq -r --arg a "$ANN" '.metadata.annotations[$a] // empty' <<<"$pod")
+      [[ -z "$cfg" ]] && { echo "skip $name: no $ANN annotation"; continue; }
+      if jq -e '.status.conditions[]? | select(.type=="PodResizePending" or .type=="PodResizeInProgress")' <<<"$pod" >/dev/null; then
+        echo "skip $name: resize already pending"; continue
+      fi
+
+      patch='{"spec":{"containers":[]}}'
+      for c in $(jq -r 'keys[]' <<<"$cfg"); do
+        if [[ "$MODE" == "idle" ]]; then
+          cpu=$(jq -r --arg c "$c" '.[$c].cpu' <<<"$cfg")
+          mem=$(jq -r --arg c "$c" '.[$c].memory' <<<"$cfg")
+          # Memory guard: request >= current usage * 1.15. If metrics are not available
+          # yet (pod just started, metrics-server down), keep the current memory request.
+          used=$(kubectl -n "$NS" top pod "$name" --containers --no-headers 2>/dev/null \
+                 | awk -v c="$c" '$2==c {sub("Mi","",$4); print $4}' || true)
+          if [[ -z "${used:-}" ]]; then
+            mem=$(jq -r --arg c "$c" '.spec.containers[] | select(.name==$c) | .resources.requests.memory' <<<"$pod")
+            echo "$name/$c: no metrics yet, keeping memory request $mem"
+          else
+            floor=$(( used * 115 / 100 ))
+            if (( $(to_mi "$mem") < floor )); then
+              echo "$name/$c: idle memory $mem < usage ${used}Mi +15%, using ${floor}Mi"
+              mem="${floor}Mi"
+            fi
+          fi
+        else
+          rs=$(jq -r '.metadata.ownerReferences[]? | select(.kind=="ReplicaSet") | .name' <<<"$pod")
+          [[ -z "$rs" ]] && { echo "skip $name: not owned by a ReplicaSet"; continue 2; }
+          req=$(kubectl -n "$NS" get rs "$rs" -o json \
+                | jq -c --arg c "$c" '.spec.template.spec.containers[] | select(.name==$c) | .resources.requests')
+          cpu=$(jq -r '.cpu' <<<"$req"); mem=$(jq -r '.memory' <<<"$req")
+        fi
+        patch=$(jq -c --arg c "$c" --arg cpu "$cpu" --arg mem "$mem" \
+          '.spec.containers += [{"name":$c,"resources":{"requests":{"cpu":$cpu,"memory":$mem}}}]' <<<"$patch")
+      done
+
+      echo "$MODE $name -> $patch"
+      # Strategic merge patch (the default) merges containers by name.
+      # Do not use --type merge here: it replaces the whole containers list.
+      kubectl -n "$NS" patch pod "$name" --subresource resize -p "$patch"
+    done
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: idle-shrinker-off-hours
+  namespace: demo
+spec:
+  schedule: "0 20 * * 1-5"          # 20:00 Mon-Fri; stays idle all weekend
+  timeZone: "America/Sao_Paulo"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: idle-shrinker
+          restartPolicy: Never
+          containers:
+            - name: shrink
+              image: alpine/k8s:1.36.4
+              command: ["bash", "/scripts/shrink.sh", "idle"]
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: scripts
+              configMap:
+                name: idle-shrinker
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: idle-shrinker-business-hours
+  namespace: demo
+spec:
+  schedule: "30 7 * * 1-5"          # 07:30 Mon-Fri, before users arrive
+  timeZone: "America/Sao_Paulo"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: idle-shrinker
+          restartPolicy: Never
+          containers:
+            - name: shrink
+              image: alpine/k8s:1.36.4
+              command: ["bash", "/scripts/shrink.sh", "active"]
+              env:
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: scripts
+              configMap:
+                name: idle-shrinker

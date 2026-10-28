@@ -1,0 +1,40 @@
+# Continuous right-sizing with in-place updates (no pod restart when possible).
+# Requires Kubernetes >= 1.33 (GA in 1.35) and VPA >= 1.6 (InPlaceOrRecreate is GA).
+#
+# - controlledValues: RequestsOnly  -> VPA changes requests, keeps limits as written in
+#   the Deployment. Requests drive scheduling (and therefore node count and cost); fixed
+#   limits keep the memory safety ceiling and the CPU count the runtime saw at start-up.
+# - minAllowed protects against shrinking below what the app needs to stay healthy.
+#   VPA also has a global floor: 25m CPU and 250 MB memory per pod by default
+#   (--pod-recommendation-min-cpu-millicores / --pod-recommendation-min-memory-mb).
+# - maxAllowed keeps recommendations below the largest node so pods never go Pending.
+#
+# Do NOT combine with an HPA that scales on CPU/memory *Utilization* for the same
+# workload; see 07-hpa-absolute-cpu.yaml for the compatible HPA form.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  updatePolicy:
+    # InPlaceOrRecreate: try the pod "resize" subresource first, evict only if that fails.
+    # InPlace (alpha in VPA 1.7, needs --feature-gates=InPlace=true): never evict.
+    updateMode: "InPlaceOrRecreate"
+    # Allow updates on single-replica workloads (the updater default is 2).
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: app
+        controlledResources: ["cpu", "memory"]
+        controlledValues: RequestsOnly
+        minAllowed:
+          cpu: 25m
+          memory: 128Mi
+        maxAllowed:
+          cpu: "2"
+          memory: 2Gi

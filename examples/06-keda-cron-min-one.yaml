@@ -1,0 +1,42 @@
+# Horizontal half of "near zero": never go below 1 replica, scale out during business
+# hours and on load. Requires KEDA (>= 2.x; validated with 2.21).
+#
+# - minReplicaCount: 1 keeps one warm pod (no cold start for the first user).
+# - cron trigger: pre-warms 3 replicas before users arrive, so the morning ramp does
+#   not wait for cold starts.
+# - cpu trigger uses AverageValue (absolute millicores), NOT Utilization. Utilization
+#   is usage / request; when the idle shrinker or VPA lowers the request, Utilization
+#   jumps and would trigger a scale-out storm. AverageValue is immune to that.
+#   (KEDA's cpu/memory triggers cannot drive scale-to-zero; that is fine here.)
+# - KEDA creates and owns the HPA. Do not also apply 07-hpa-absolute-cpu.yaml to the
+#   same Deployment.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: my-app
+  namespace: demo
+spec:
+  scaleTargetRef:
+    name: my-app
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 600   # avoid flapping when traffic dips
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 120
+  triggers:
+    - type: cron
+      metadata:
+        timezone: America/Sao_Paulo
+        start: "15 7 * * 1-5"    # 07:15 Mon-Fri
+        end: "0 20 * * 1-5"      # 20:00 Mon-Fri
+        desiredReplicas: "3"
+    - type: cpu
+      metricType: AverageValue
+      metadata:
+        value: "400m"            # scale out when average usage passes 400 millicores/pod

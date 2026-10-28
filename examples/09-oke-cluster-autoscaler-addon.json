@@ -1,0 +1,15 @@
+{
+  "configurations": [
+    { "key": "authType", "value": "workload" },
+    { "key": "nodes", "value": "1:10:<prod-app-node-pool-ocid>, 0:5:<non-prod-node-pool-ocid>" },
+    { "key": "numOfReplicas", "value": "2" },
+    { "key": "nodeSelectors", "value": "{\"pool-role\":\"system\"}" },
+    { "key": "maxNodeProvisionTime", "value": "25m" },
+    { "key": "scaleDownUnneededTime", "value": "10m" },
+    { "key": "scaleDownDelayAfterAdd", "value": "10m" },
+    { "key": "scaleDownUtilizationThreshold", "value": "0.6" },
+    { "key": "skipNodesWithLocalStorage", "value": "false" },
+    { "key": "balanceSimilarNodeGroups", "value": "true" },
+    { "key": "balancingIgnoreLabel", "value": "displayName, hostname, internal_addr, oci.oraclecloud.com/fault-domain" }
+  ]
+}

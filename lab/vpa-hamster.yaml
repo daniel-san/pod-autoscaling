@@ -1,0 +1,54 @@
+# Lab-only: adapted from the upstream VPA "hamster" example. The container requests
+# 100m CPU but burns ~500m, so VPA raises the request quickly. With
+# updateMode InPlaceOrRecreate the change should land without a restart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hamster
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hamster
+  template:
+    metadata:
+      labels:
+        app: hamster
+    spec:
+      containers:
+        - name: hamster
+          image: registry.k8s.io/ubuntu-slim:0.14
+          command: ["/bin/sh"]
+          args: ["-c", "while true; do timeout 0.5s yes >/dev/null; sleep 0.5s; done"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 50Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+---
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: hamster
+  namespace: demo
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hamster
+  updatePolicy:
+    updateMode: "InPlaceOrRecreate"
+    minReplicas: 1
+  resourcePolicy:
+    containerPolicies:
+      - containerName: hamster
+        controlledValues: RequestsOnly
+        minAllowed:
+          cpu: 50m
+          memory: 50Mi
+        maxAllowed:
+          cpu: "1"
+          memory: 256Mi

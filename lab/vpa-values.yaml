@@ -1,0 +1,20 @@
+# Helm values for the official VPA chart (autoscaler/vertical-pod-autoscaler 0.15.0 = VPA 1.8.1).
+# Lab-only settings: single replicas and the alpha feature gates enabled so the
+# InPlace and CPUStartupBoost examples can be exercised.
+# For OKE production, keep 2 replicas per component and only enable alpha gates after testing.
+admissionController:
+  replicas: 1
+  extraArgs:
+    - --feature-gates=InPlace=true,CPUStartupBoost=true
+recommender:
+  replicas: 1
+  extraArgs:
+    - --recommender-interval=30s
+updater:
+  replicas: 1
+  extraArgs:
+    - --in-place-skip-disruption-budget=true
+    - --feature-gates=InPlace=true,CPUStartupBoost=true
+    - --updater-interval=30s
+    # Lab runs single-replica deployments; production default is 2.
+    - --min-replicas=1

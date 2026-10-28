@@ -1,0 +1,17 @@
+# Step 1 for every workload: let VPA observe and recommend, without touching pods.
+# Read the result with:
+#   kubectl -n demo get vpa my-app-recommender -o jsonpath='{.status.recommendation}'
+# Keep it running for at least one full business cycle (a week is better) before
+# trusting the numbers. VPA keeps an 8-day, exponentially decaying usage history.
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-app-recommender
+  namespace: demo
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  updatePolicy:
+    updateMode: "Off"
